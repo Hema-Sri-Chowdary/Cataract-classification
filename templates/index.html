@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nuclear Cataract Detection and Grading System</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Top Header -->
+    <header class="app-header">
+        <div class="header-container">
+            <h1 class="header-title">Nuclear Cataract Detection and Grading System</h1>
+            <span class="badge-tech">Attention U-Net + GoogLeNet</span>
+        </div>
+    </header>
+
+    <!-- App Main Body -->
+    <main class="main-container">
+        <!-- Research Disclaimer Banner -->
+        <div class="disclaimer-banner">
+            <strong>Research Disclaimer:</strong> This system is a research prototype and is not a substitute for professional ophthalmological diagnosis.
+        </div>
+
+        <!-- Top Input & System Pipeline Grid -->
+        <div class="top-grid">
+            <!-- Left Card: Upload Slit-Lamp Image -->
+            <div class="card input-card">
+                <h2 class="card-title">Upload Slit-Lamp Image</h2>
+                
+                <div class="image-upload-box" id="dropZone">
+                    <input type="file" id="fileInput" accept="image/*" hidden>
+                    
+                    <!-- Empty Drop Prompt -->
+                    <div class="upload-placeholder" id="uploadPlaceholder">
+                        <i class="fa-solid fa-cloud-arrow-up upload-icon"></i>
+                        <p>Drag & Drop Slit-Lamp Photograph here</p>
+                        <button type="button" class="btn-browse" onclick="document.getElementById('fileInput').click()">Select Image</button>
+                    </div>
+
+                    <!-- Selected Image Preview -->
+                    <div class="preview-box hidden" id="previewBox">
+                        <img id="imgPreview" src="" alt="Slit Lamp Input">
+                        <div class="remove-btn-wrapper">
+                            <button type="button" class="btn-remove" id="btnRemove">Remove Image</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sample Selector Strip -->
+                <div class="samples-strip" id="samplesStrip">
+                    <span class="samples-label">Select Sample:</span>
+                    <div class="samples-scroll" id="samplesScroll">
+                        <!-- Populated via JS -->
+                    </div>
+                </div>
+
+                <!-- Analyze Image Button -->
+                <button type="button" class="btn-analyze" id="btnAnalyze" disabled>Analyze Image</button>
+            </div>
+
+            <!-- Right Card: System Pipeline -->
+            <div class="card pipeline-card">
+                <h2 class="card-title">System Pipeline</h2>
+                <ol class="pipeline-list">
+                    <li><span class="step-num">1.</span> Slit-Lamp Image Preprocessing (RGB)</li>
+                    <li><span class="step-num">2.</span> Attention U-Net Lens/Nucleus Segmentation</li>
+                    <li><span class="step-num">3.</span> Bounding Box ROI Extraction (224×224)</li>
+                    <li><span class="step-num">4.</span> GoogLeNet Nuclear Cataract Classification</li>
+                    <li><span class="step-num">5.</span> Grad-CAM Explanation & Alignment Analysis</li>
+                </ol>
+            </div>
+        </div>
+
+        <!-- Metric Stat Cards (3-Card Row) -->
+        <div class="stats-row hidden" id="statsRow">
+            <!-- Card 1: Prediction -->
+            <div class="stat-card">
+                <span class="stat-label">MODEL PREDICTION</span>
+                <h2 class="stat-value val-prediction" id="statPrediction">--</h2>
+                <span class="stat-sub">Predicted Cataract Class</span>
+            </div>
+
+            <!-- Card 2: Confidence -->
+            <div class="stat-card">
+                <span class="stat-label">MODEL CONFIDENCE</span>
+                <h2 class="stat-value" id="statConfidence">--%</h2>
+                <span class="stat-sub">Predicted Probability</span>
+            </div>
+
+            <!-- Card 3: XAI Coverage -->
+            <div class="stat-card">
+                <span class="stat-label">XAI COVERAGE</span>
+                <h2 class="stat-value" id="statCoverage">--%</h2>
+                <span class="stat-sub">Heatmap Inside U-Net Mask</span>
+            </div>
+        </div>
+
+        <!-- Lower Grid: Tabbed Visual Panel & Sidebar Metrics -->
+        <div class="lower-grid hidden" id="lowerGrid">
+            <!-- Left Card: Visual Tabbed Panel -->
+            <div class="card visual-panel-card">
+                <div class="panel-nav">
+                    <button type="button" class="tab-btn active" data-tab="tab5panel">5-Panel Overview</button>
+                    <button type="button" class="tab-btn" data-tab="tabOriginal">Original</button>
+                    <button type="button" class="tab-btn" data-tab="tabSeg">Segmentation</button>
+                    <button type="button" class="tab-btn" data-tab="tabRoi">ROI</button>
+                    <button type="button" class="tab-btn" data-tab="tabGradcam">Grad-CAM</button>
+                </div>
+
+                <div class="tab-content-container">
+                    <!-- Tab 1: 5-Panel Overview -->
+                    <div class="tab-pane active" id="tab5panel">
+                        <div class="five-panel-grid">
+                            <div class="panel-item">
+                                <span class="panel-title">1. Original Image</span>
+                                <img id="p1Original" src="" alt="1. Original Image">
+                            </div>
+                            <div class="panel-item">
+                                <span class="panel-title">2. Attention U-Net Mask</span>
+                                <img id="p2Mask" src="" alt="2. Attention U-Net Mask">
+                            </div>
+                            <div class="panel-item">
+                                <span class="panel-title">3. Extracted ROI (224×224)</span>
+                                <img id="p3Roi" src="" alt="3. Extracted ROI">
+                            </div>
+                            <div class="panel-item">
+                                <span class="panel-title">4. Grad-CAM Activation</span>
+                                <img id="p4Heatmap" src="" alt="4. Grad-CAM Activation">
+                            </div>
+                            <div class="panel-item">
+                                <span class="panel-title" id="p5Title">5. Overlay</span>
+                                <img id="p5Overlay" src="" alt="5. Overlay">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Tab Single Viewers -->
+                    <div class="tab-pane single-view-pane hidden" id="tabSingleView">
+                        <img id="imgSingleView" src="" alt="Single Visual View">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Sidebar: Stacked Cards -->
+            <div class="sidebar-stack">
+                <!-- Top Stack: Class Probabilities -->
+                <div class="card prob-card">
+                    <h3 class="side-card-title">Class Probabilities</h3>
+                    <div class="prob-rows-container" id="probRows">
+                        <!-- Populated via JS -->
+                    </div>
+                </div>
+
+                <!-- Bottom Stack: Alignment Metrics -->
+                <div class="card metrics-card">
+                    <h3 class="side-card-title">Alignment Metrics</h3>
+                    <div class="metric-row">
+                        <span class="metric-key">IoU</span>
+                        <strong class="metric-val" id="metricIoU">0.0000</strong>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-key">Dice Coefficient</span>
+                        <strong class="metric-val" id="metricDice">0.0000</strong>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-key">In-Region Coverage %</span>
+                        <strong class="metric-val" id="metricCoverage">0.0%</strong>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Custom JS -->
+    <script src="/static/main.js"></script>
+</body>
+</html>
