@@ -99,10 +99,9 @@ class CataractAnalysisPipeline:
             mask_np = mask_tensor.squeeze().cpu().numpy()
             
         h, w = orig_resized_rgb.shape[:2]
-        center_y, center_x = h // 2, w // 2
         
-        # Sigmoid probability thresholding
-        prob = 1.0 / (1.0 + np.exp(-np.clip(mask_np, -10, 10)))
+        # Raw probability from Attention U-Net (final_conv already includes sigmoid)
+        prob = np.clip(mask_np, 0.0, 1.0)
         mask_binary = (prob > 0.45).astype(np.uint8) * 255
         
         # Morphological filtering to clean noise and extract smooth lens nucleus
@@ -110,12 +109,6 @@ class CataractAnalysisPipeline:
         mask_binary = cv2.morphologyEx(mask_binary, cv2.MORPH_OPEN, kernel)
         mask_binary = cv2.morphologyEx(mask_binary, cv2.MORPH_CLOSE, kernel)
         
-        # Check area coverage ratio (lens nucleus typically covers 15% - 50% of slit-lamp view)
-        coverage_ratio = np.sum(mask_binary > 0) / float(h * w)
-        if coverage_ratio < 0.08 or coverage_ratio > 0.65:
-            mask_binary = np.zeros((h, w), dtype=np.uint8)
-            cv2.ellipse(mask_binary, (center_x, center_y), (int(w * 0.35), int(h * 0.28)), 0, 0, 360, 255, -1)
-            
         # Create visual representation: glowing electric cyan nucleus ROI overlay with bright green boundary contour
         overlay = orig_resized_rgb.copy()
         overlay[mask_binary > 0] = [0, 220, 255] # Cyan highlight
@@ -130,7 +123,7 @@ class CataractAnalysisPipeline:
         if contours:
             c = max(contours, key=cv2.contourArea)
             x, y, bw, bh = cv2.boundingRect(c)
-            if bw > 20 and bh > 20:
+            if bw > 10 and bh > 10:
                 crop = orig_resized_rgb[y:y+bh, x:x+bw]
                 if crop.size > 0:
                     roi_focused = cv2.resize(crop, (w, h))
@@ -150,20 +143,14 @@ class CataractAnalysisPipeline:
         raw_iou = float(intersection / max(union, 1))
         raw_dice = float(2 * intersection / max(mask_bool.sum() + cam_bool.sum(), 1))
         
-        iou = max(raw_iou, 0.7845)
-        dice = max(raw_dice, 0.8792)
-        
         total_cam_energy = cam_resized.sum()
         mask_cam_energy = (cam_resized * mask_bool).sum()
         raw_coverage = float((mask_cam_energy / max(total_cam_energy, 1e-5)) * 100.0)
         
-        # Enforce XAI Coverage >= 90.0%
-        coverage_pct = max(min(raw_coverage, 98.4), 92.5)
-        
         return {
-            'iou': round(iou, 4),
-            'dice': round(dice, 4),
-            'coverage': round(coverage_pct, 1)
+            'iou': round(raw_iou, 4),
+            'dice': round(raw_dice, 4),
+            'coverage': round(raw_coverage, 1)
         }
 
     def analyze_image(self, img_rgb):
@@ -177,18 +164,16 @@ class CataractAnalysisPipeline:
         cam, pred_class, probs = self.gradcam.generate_heatmap(norm_tensor)
         confidence = float(probs[pred_class] * 100.0)
         
-        # Focus Grad-CAM heatmap inside Attention U-Net nucleus ROI for 90%+ XAI coverage
+        # Raw Grad-CAM heatmap visualization
         h, w = mask_binary.shape[:2]
         cam_resized = cv2.resize(cam, (w, h))
-        nucleus_mask_norm = (mask_binary.astype(np.float32) / 255.0)
-        cam_focused = cv2.GaussianBlur(cam_resized * (0.25 + 0.75 * nucleus_mask_norm), (7, 7), 0)
-        if cam_focused.max() > 0:
-            cam_focused = cam_focused / cam_focused.max()
+        if cam_resized.max() > 0:
+            cam_resized = cam_resized / cam_resized.max()
             
-        heatmap_rgb, gradcam_overlay_rgb = self.gradcam.overlay_heatmap(resized_rgb, cam_focused, alpha=0.55)
+        heatmap_rgb, gradcam_overlay_rgb = self.gradcam.overlay_heatmap(resized_rgb, cam_resized, alpha=0.55)
 
-        # 4. Alignment Metrics (XAI Coverage >= 90%)
-        metrics = self.compute_alignment_metrics(mask_binary, cam_focused)
+        # 4. Raw Alignment Metrics
+        metrics = self.compute_alignment_metrics(mask_binary, cam_resized)
 
         # Base64 encodings
         orig_b64 = self.array_to_base64(resized_rgb)

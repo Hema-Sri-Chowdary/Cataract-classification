@@ -9,9 +9,8 @@ import cv2
 
 class NuclearCataractDatabase(Dataset):
     """
-    Dataset loader supporting:
-    1. Nuclear Cataract Database for Biomedical and Machine Learning Applications (1,320 images)
-    2. Mendeley Data2025 Clean dataset (200 images)
+    Dataset loader for:
+    Nuclear Cataract Database for Biomedical and Machine Learning Applications (1,320 images).
     Uses organic optical feature analysis matching LOCS III standards.
     """
     CLASS_NAMES = [
@@ -74,6 +73,27 @@ class NuclearCataractDatabase(Dataset):
         else:
             return 0
 
+    def _extract_patient_and_eye(self, path):
+        parts = path.replace('\\', '/').split('/')
+        patient_id = "unknown"
+        eye_id = "unknown"
+        if "Nuclear Cataract Dataset" in parts:
+            idx = parts.index("Nuclear Cataract Dataset")
+            if idx + 2 < len(parts):
+                patient_id = parts[idx + 1]
+                eye_id = f"{parts[idx + 1]}_{parts[idx + 2]}"
+        elif "Clean images" in parts:
+            filename = parts[-1]
+            import re
+            match = re.match(r'^(\d+)([A-Za-z]+)', filename)
+            if match:
+                patient_id = match.group(1)
+                eye_id = f"{match.group(1)}_{match.group(2)[:1]}"
+            else:
+                patient_id = filename.split(' ')[0]
+                eye_id = patient_id
+        return patient_id, eye_id
+
     def _scan_and_index_dataset(self, base_dir, cache_file):
         samples = []
         all_paths = []
@@ -93,14 +113,38 @@ class NuclearCataractDatabase(Dataset):
                         full_path = os.path.join(alt_dir, f)
                         all_paths.append((f, full_path))
 
-        print(f"Indexing {len(all_paths)} dataset images with LOCS III organic optical metrics...")
+        # Check for expert label file
+        expert_labels = {}
+        expert_label_file = 'dataset_meta/locs_iii_expert_labels.json'
+        if os.path.exists(expert_label_file):
+            try:
+                with open(expert_label_file, 'r') as ef:
+                    expert_labels = json.load(ef)
+                print(f"Loaded {len(expert_labels)} expert LOCS III labels from {expert_label_file}.")
+            except Exception as e:
+                print(f"Could not load expert label file: {e}")
+
+        print(f"Indexing {len(all_paths)} dataset images with patient IDs and LOCS III grades...")
         for f, full_path in all_paths:
-            label = self._extract_organic_label(full_path)
+            normalized_path = full_path.replace('\\', '/')
+            patient_id, eye_id = self._extract_patient_and_eye(normalized_path)
+            
+            if f in expert_labels:
+                label = int(expert_labels[f])
+            elif normalized_path in expert_labels:
+                label = int(expert_labels[normalized_path])
+            else:
+                label = self._extract_organic_label(full_path)
+
+            class_name = self.CLASS_NAMES[label] if label < len(self.CLASS_NAMES) else f"Grade {label}"
+            
             samples.append({
                 'filename': f,
-                'path': full_path.replace('\\', '/'),
+                'path': normalized_path,
+                'patient_id': patient_id,
+                'eye_id': eye_id,
                 'label': label,
-                'class_name': self.CLASS_NAMES[label]
+                'class_name': class_name
             })
 
         # Save cache

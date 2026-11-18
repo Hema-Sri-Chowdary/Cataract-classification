@@ -69,7 +69,7 @@ class FastCachedDataset(Dataset):
             'filename': self.filenames[idx]
         }
 
-def train_model():
+def train_model(epochs_per_fold=10, n_splits=5):
     set_seed(42)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device} (Threads: {torch.get_num_threads()})", flush=True)
@@ -77,140 +77,155 @@ def train_model():
     # Load base dataset
     full_ds = NuclearCataractDatabase()
     n_samples = len(full_ds)
-    print(f"Total dataset size: {n_samples}", flush=True)
+    print(f"Total dataset size: {n_samples} images", flush=True)
 
-    # Train / Validation split (80/20)
-    indices = list(range(n_samples))
-    random.seed(42)
-    random.shuffle(indices)
+    # Extract patient IDs for patient-level grouping
+    patient_ids = [sample.get('patient_id', 'unknown') for sample in full_ds.samples]
+    unique_patients = list(set(patient_ids))
+    print(f"Total unique patients: {len(unique_patients)}", flush=True)
 
-    val_size = int(0.20 * n_samples)
-    train_indices = indices[val_size:]
-    val_indices = indices[:val_size]
+    from sklearn.model_selection import GroupKFold
+    gkf = GroupKFold(n_splits=n_splits)
 
-    train_ds = FastCachedDataset(full_ds, train_indices, augment=True)
-    val_ds = FastCachedDataset(full_ds, val_indices, augment=False)
-
-    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=0)
-
-    # Initialize model
-    model = CataractGoogLeNet(num_classes=4, pretrained=True).to(device)
-
-    # Unfreeze full network for complete end-to-end medical feature representation
-    for param in model.parameters():
-        param.requires_grad = True
-
-    # Differential learning rate: lower for early feature extractors, higher for upper inception blocks & head
-    backbone_params = [p for n, p in model.named_parameters() if 'fc' not in n]
-    head_params = [p for n, p in model.named_parameters() if 'fc' in n]
-
-    optimizer = optim.AdamW([
-        {'params': backbone_params, 'lr': 1.5e-4},
-        {'params': head_params, 'lr': 8e-4}
-    ], weight_decay=1e-4)
-
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.03)
-    epochs = 30
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+    all_targets = [sample['label'] for sample in full_ds.samples]
+    X_dummy = np.zeros(n_samples)
 
     os.makedirs('checkpoints', exist_ok=True)
     best_checkpoint_path = 'checkpoints/googlenet_cataract.pth'
-    best_val_acc = 0.0
 
-    epochs = 30
-    print("\nStarting Fast Single-Pass CataractGoogLeNet Training...", flush=True)
-    print("-" * 65, flush=True)
+    overall_best_acc = 0.0
+    fold_metrics = []
 
-    for epoch in range(1, epochs + 1):
-        model.train()
-        running_loss = 0.0
-        train_preds, train_targets = [], []
+    print(f"\nStarting Patient-Level {n_splits}-Fold Cross-Validation CataractGoogLeNet Training...", flush=True)
+    print("=" * 70, flush=True)
 
-        for batch in train_loader:
-            inputs = batch['tensor'].to(device)
-            targets = torch.as_tensor(batch['label'], dtype=torch.long).to(device)
+    for fold, (train_idx, val_idx) in enumerate(gkf.split(X_dummy, all_targets, groups=patient_ids), 1):
+        print(f"\n--- FOLD {fold}/{n_splits} ---", flush=True)
+        print(f"Training images: {len(train_idx)} | Validation images: {len(val_idx)}", flush=True)
+        train_patients = set(patient_ids[i] for i in train_idx)
+        val_patients = set(patient_ids[i] for i in val_idx)
+        print(f"Training patients: {len(train_patients)} | Validation patients: {len(val_patients)}", flush=True)
 
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            preds = torch.argmax(outputs, dim=1)
+        train_ds = FastCachedDataset(full_ds, train_idx, augment=True)
+        val_ds = FastCachedDataset(full_ds, val_idx, augment=False)
 
-            loss.backward()
-            optimizer.step()
+        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
+        val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=0)
 
-            running_loss += loss.item() * inputs.size(0)
-            train_preds.extend(preds.cpu().numpy())
-            train_targets.extend(targets.cpu().numpy())
+        model = CataractGoogLeNet(num_classes=4, pretrained=True).to(device)
+        for param in model.parameters():
+            param.requires_grad = True
 
-        scheduler.step()
+        backbone_params = [p for n, p in model.named_parameters() if 'fc' not in n]
+        head_params = [p for n, p in model.named_parameters() if 'fc' in n]
 
-        train_epoch_loss = running_loss / len(train_ds)
-        train_epoch_acc = accuracy_score(train_targets, train_preds) * 100.0
+        optimizer = optim.AdamW([
+            {'params': backbone_params, 'lr': 1.5e-4},
+            {'params': head_params, 'lr': 8e-4}
+        ], weight_decay=1e-4)
 
-        # Validation Phase
-        model.eval()
-        val_loss = 0.0
-        val_preds, val_targets = [], []
+        criterion = nn.CrossEntropyLoss(label_smoothing=0.03)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs_per_fold, eta_min=1e-5)
 
-        with torch.no_grad():
-            for batch in val_loader:
+        fold_best_acc = 0.0
+
+        for epoch in range(1, epochs_per_fold + 1):
+            model.train()
+            running_loss = 0.0
+            train_preds, train_targets = [], []
+
+            for batch in train_loader:
                 inputs = batch['tensor'].to(device)
                 targets = torch.as_tensor(batch['label'], dtype=torch.long).to(device)
 
+                optimizer.zero_grad()
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
-
                 preds = torch.argmax(outputs, dim=1)
-                val_loss += loss.item() * inputs.size(0)
-                val_preds.extend(preds.cpu().numpy())
-                val_targets.extend(targets.cpu().numpy())
 
-        val_epoch_loss = val_loss / len(val_ds)
-        val_epoch_acc = accuracy_score(val_targets, val_preds) * 100.0
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            val_targets, val_preds, average='weighted', zero_division=0
-        )
+                loss.backward()
+                optimizer.step()
 
-        print(f"Epoch [{epoch:02d}/{epochs:02d}] "
-              f"Train Loss: {train_epoch_loss:.4f} | Train Acc: {train_epoch_acc:.2f}% | "
-              f"Val Loss: {val_epoch_loss:.4f} | Val Acc: {val_epoch_acc:.2f}% | "
-              f"F1: {f1:.4f}", flush=True)
+                running_loss += loss.item() * inputs.size(0)
+                train_preds.extend(preds.cpu().numpy())
+                train_targets.extend(targets.cpu().numpy())
 
-        if val_epoch_acc > best_val_acc:
-            best_val_acc = val_epoch_acc
-            torch.save(model.state_dict(), best_checkpoint_path)
-            print(f"  >>> Checkpoint Saved! Best Val Acc: {best_val_acc:.2f}%", flush=True)
+            scheduler.step()
 
-    print("-" * 65, flush=True)
-    print(f"Training Complete. Peak Organic Validation Accuracy: {best_val_acc:.2f}%", flush=True)
-    print(f"Checkpoint saved at: {best_checkpoint_path}", flush=True)
+            train_epoch_loss = running_loss / len(train_ds)
+            train_epoch_acc = accuracy_score(train_targets, train_preds) * 100.0
 
-    # Load best weights for final audit
-    model.load_state_dict(torch.load(best_checkpoint_path, map_location=device))
-    model.eval()
-    final_preds, final_targets = [], []
-    with torch.no_grad():
-        for batch in val_loader:
-            inputs = batch['tensor'].to(device)
-            targets = torch.as_tensor(batch['label'], dtype=torch.long).to(device)
-            outputs = model(inputs)
-            preds = torch.argmax(outputs, dim=1)
-            final_preds.extend(preds.cpu().numpy())
-            final_targets.extend(targets.cpu().numpy())
+            # Validation Phase
+            model.eval()
+            val_loss = 0.0
+            val_preds, val_targets = [], []
 
-    final_acc = accuracy_score(final_targets, final_preds) * 100.0
-    prec, rec, f1_final, _ = precision_recall_fscore_support(final_targets, final_preds, average='weighted', zero_division=0)
-    cm = confusion_matrix(final_targets, final_preds)
+            with torch.no_grad():
+                for batch in val_loader:
+                    inputs = batch['tensor'].to(device)
+                    targets = torch.as_tensor(batch['label'], dtype=torch.long).to(device)
 
-    print("\n=== FINAL AUDIT REPORT ===", flush=True)
-    print(f"Final Validation Accuracy : {final_acc:.2f}%", flush=True)
-    print(f"Precision                 : {prec:.4f}", flush=True)
-    print(f"Recall                    : {rec:.4f}", flush=True)
-    print(f"F1-Score                  : {f1_final:.4f}", flush=True)
-    print("Confusion Matrix:\n", cm, flush=True)
+                    outputs = model(inputs)
+                    loss = criterion(outputs, targets)
 
-    return final_acc
+                    preds = torch.argmax(outputs, dim=1)
+                    val_loss += loss.item() * inputs.size(0)
+                    val_preds.extend(preds.cpu().numpy())
+                    val_targets.extend(targets.cpu().numpy())
+
+            val_epoch_loss = val_loss / len(val_ds)
+            val_epoch_acc = accuracy_score(val_targets, val_preds) * 100.0
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                val_targets, val_preds, average='weighted', zero_division=0
+            )
+
+            print(f"Fold {fold} Epoch [{epoch:02d}/{epochs_per_fold:02d}] "
+                  f"Train Loss: {train_epoch_loss:.4f} | Train Acc: {train_epoch_acc:.2f}% | "
+                  f"Val Loss: {val_epoch_loss:.4f} | Val Acc: {val_epoch_acc:.2f}% | "
+                  f"F1: {f1:.4f}", flush=True)
+
+            if val_epoch_acc > fold_best_acc:
+                fold_best_acc = val_epoch_acc
+                if fold_best_acc > overall_best_acc:
+                    overall_best_acc = fold_best_acc
+                    torch.save(model.state_dict(), best_checkpoint_path)
+                    print(f"  >>> New Overall Best Checkpoint Saved! Val Acc: {overall_best_acc:.2f}%", flush=True)
+
+        # Audit for this fold
+        fold_metrics.append({
+            'fold': fold,
+            'train_images': len(train_idx),
+            'val_images': len(val_idx),
+            'val_acc': fold_best_acc,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'cm': confusion_matrix(val_targets, val_preds)
+        })
+
+    # Overall Audit Report across folds
+    avg_acc = np.mean([m['val_acc'] for m in fold_metrics])
+    avg_prec = np.mean([m['precision'] for m in fold_metrics])
+    avg_rec = np.mean([m['recall'] for m in fold_metrics])
+    avg_f1 = np.mean([m['f1'] for m in fold_metrics])
+    total_cm = sum([m['cm'] for m in fold_metrics])
+    last_val_count = fold_metrics[-1]['val_images']
+    last_train_count = fold_metrics[-1]['train_images']
+
+    print("\n" + "=" * 70, flush=True)
+    print("=== FINAL AUDIT REPORT (Patient-Level Group 5-Fold Cross Validation) ===", flush=True)
+    print(f"Number of Training Images (per fold avg) : {last_train_count}", flush=True)
+    print(f"Number of Validation Images (per fold avg): {last_val_count}", flush=True)
+    print(f"Total Unique Patients                     : {len(unique_patients)}", flush=True)
+    print(f"5-Fold Mean Validation Accuracy           : {avg_acc:.2f}%", flush=True)
+    print(f"Peak Validation Accuracy                  : {overall_best_acc:.2f}%", flush=True)
+    print(f"Weighted Precision                       : {avg_prec:.4f}", flush=True)
+    print(f"Weighted Recall                          : {avg_rec:.4f}", flush=True)
+    print(f"Weighted F1-Score                        : {avg_f1:.4f}", flush=True)
+    print("Aggregated Confusion Matrix Across Folds:\n", total_cm, flush=True)
+    print("=" * 70, flush=True)
+
+    return avg_acc
 
 if __name__ == '__main__':
-    train_model()
+    train_model(epochs_per_fold=6, n_splits=5)
